@@ -1,0 +1,385 @@
+import string, time, re, os, types, copy
+import TextRules, SampleAnalysis
+
+#**********************************************************************
+# MAKE NO CHANGES HERE
+# The minimum contents of this file are the following class definition
+# and the __init__ method with only "pass" line in it.
+
+class CCF_CYS_Overrides:
+    def __init__(self):
+        pass
+
+# End MAKE NO CHANGES HERE
+#**********************************************************************
+    # Make sure to indent methods inside the class statement.
+    #----- WFO MOB CCF Overrides -----
+
+    # It is helpful to put a debug statement at the beginning of each
+    # method to help with trouble-shooting.
+    #def _method(self):
+        #self.debug_print("Debug: _method in CCF_SR_Overrides")
+
+    # Example of Overriding a dictionary from TextRules
+    #def phrase_descriptor_dict(self, tree, node):
+        #dict = TextRules.TextRules.phrase_descriptor_dict(self, tree, node)
+        #dict["PoP"] = "chance of"
+        #return dict
+
+    def _preProcessProduct(self, fcst, argDict):
+        # Add product heading to fcst string
+        fcst = fcst + self._wmoID + " " + self._fullStationID + " " + \
+               self._ddhhmmTime + "\n" + self._pil + "\n"
+        
+        timeRange, label = self._codePeriods[0]
+
+        # the following code attempts to convert a time tuple to a timerange string tuple
+        timeRangeStr = str(timeRange)
+
+        # now let's slice out the first value
+        beginTimeStr = timeRangeStr[1:23]
+
+        # now let's add in the beginning time of the first grid into the product for Ray
+        fcst = fcst + "\n" + beginTimeStr + "\n\n"
+        
+
+        return fcst
+
+    def _determineTimeRanges(self, argDict):
+        # Determine time ranges for product
+        # Returns popPeriods, snowPeriods, tempPeriods, codePeriods (4 different time periods) which
+        # are a list of tuples (timeRange, label).
+
+        # Calculate ddhhmm string value. Thias gets carried through to other subroutines
+        self._currentTime = argDict['creationTime']  #ZULU
+        self._ddhhmmTime = time.strftime("%d%H%M",time.gmtime(
+            self._currentTime))
+
+        # PoP Time ranges :
+        #   13 or 14 12-hour periods
+        #   If AM, begin at 12z of issue day (default), may be overridden
+        #     by the popStartZ_AM flag.
+        #   If PM, begin at 00z of next day (default), may be overridden
+        #     by the popStartZ_AM flag.
+        if self._productIssuance == "Morning":
+            startT = self._popStartZ_AM
+        else:
+            startT = self._popStartZ_AM + 12      # account for PM start later
+            
+        print "***THIS is PoPSTart Time:", startT
+        
+        currTime = time.localtime(time.time())
+        currHour = currTime[3]
+        print "current hour in localTime in determineTimeRanges is:", currHour   
+       
+        # rollover  - different days from gmtime and local time
+        # so we need to sample the PoP from "yesterday"
+        # for MDT, rollover occurs from 5pm-midnight LST
+        if time.gmtime(self._currentTime)[2] !=  time.localtime(self._currentTime)[2]: 
+            startT = startT - 24
+        if (currHour >= 0) and (currHour < 3):
+            startT = startT - 24
+        print "***THIS is the second PoPSTart Time:", startT
+            
+        popStartTR = self.createTimeRange(startT, startT + 1, mode="Zulu")
+        timePeriod = 12
+        timeSpan = 12
+        if self._productIssuance == "Morning":
+           numPeriods = self._AMnumPeriods
+        else:
+           numPeriods = 14
+        self._popPeriods = self.getPeriods(popStartTR, timePeriod,
+                                     timeSpan, numPeriods)
+        print "popPeriods in determineTimeRanges is:", self._popPeriods
+
+
+        # Snow Time Ranges, same as PoP, but not as many
+        self._snowPeriods = self._popPeriods[0:3]
+        
+        # Temp Time ranges : 13 or 14 periods, 12 hours apart, 5 hour span
+        #   This is to catch the correct Max/Min temp grid
+        #   If AM, begin with noon LT of issue day to catch MaxT
+        #   If Mid to 3am begin with midnight of that day
+        #   If PM, begin with midnight LT of issue day to get MinT
+        if self._productIssuance == "Morning":
+            tempStartTR = self.createTimeRange(10, 15)
+        elif (currHour >= 0) and (currHour < 3):
+            tempStartTR = self.createTimeRange(0, 5)    
+        else:
+            tempStartTR = self.createTimeRange(22, 27)
+        timePeriod = 12
+        timeSpan = 5
+        if self._productIssuance == "Morning":
+           numPeriods = self._AMnumPeriods
+        else:
+           numPeriods = 14           
+        self._tempPeriods = self.getPeriods(tempStartTR, timePeriod, timeSpan,
+                                  numPeriods)
+
+        
+
+        ##### Weather Code Time Ranges: 
+        if self._productIssuance == "Morning":
+            codeStartTR = self.createTimeRange(self._wxStartLT_AM, self._wxStartLT_AM + 1)
+        elif (currHour >= 0) and (currHour < 3):
+            codeStartTR = self.createTimeRange(self._wxStartLT_AM - 12, self._wxStartLT_AM - 11)
+        else:
+            codeStartTR = self.createTimeRange(self._wxStartLT_AM + 12, self._wxStartLT_AM + 13)
+            
+        print "***THIS is codeStartTR Time:", codeStartTR
+        print "***THIS is wxStartLT_AM Time:", self._wxStartLT_AM
+       
+        timePeriod =12
+        timeSpan = self._wxStopLT_AM - self._wxStartLT_AM # or 12hrs
+        if self._productIssuance == "Morning":
+           numPeriods = self._AMnumPeriods
+        else:
+           numPeriods = 14
+        self._codePeriods = self.getPeriods(codeStartTR, timePeriod, timeSpan,
+                                      numPeriods)
+
+        timeRange, label = self._codePeriods[0]
+        print "timeRange pulled from first period in codePeriods in determineTimeRanges is:", timeRange
+        print "all periods for wx codes is:", self._codePeriods
+        
+        ## lets convert the timerange to a string and pull the hour of the beginning
+        ## time
+        timeRangeStr = str(timeRange)
+        beginTimeHourStr = timeRangeStr[11:13]
+        print "Time Range:",timeRange
+
+        currTime = time.localtime(time.time())
+        currHour = currTime[3]
+        periodModded = 0
+        label = "" # this is needed for the infrastruction
+        if self._productIssuance == "Morning":
+            if currHour >  self._wxStartLT_AM:  # this is the morning and hour > wxStartTime or between midnight and 6am
+                modFirstPeriod = self.createTimeRange(currHour, self._wxStartLT_AM +12)
+                print "newly created first period in determineTimeRanges is:",modFirstPeriod
+                newFirst = (modFirstPeriod, label) 
+                print "new first period info is:", newFirst
+                periodModded = 1
+        elif (currHour >= 0) and (currHour < 3): # this is to account for the mid to 3 am period. 
+                modFirstPeriod = self.createTimeRange(currHour, self._wxStartLT_AM)
+                print "****THIS IS THE ELIF newly created first period in determineTimeRanges is:",modFirstPeriod
+                newFirst = (modFirstPeriod, label) 
+                print "****ELIF new first period info is:", newFirst
+                periodModded = 1       
+        else: # we are assuming this is the afternoon issuance
+             if (currHour < self._wxStartLT_AM) or (currHour > (self._wxStopLT_AM)): # hour is between midnight and 6am or between 6pm and midnight
+                 modFirstPeriod = self.createTimeRange(currHour, self._wxStopLT_AM +12)
+                 print "THIS IS THE ELSE newly created first period in d etermineTimeRanges is:",modFirstPeriod 
+                 print "***THIS is wxStartLT_AM Time:", self._wxStartLT_AM
+                 print "***THIS is wxStopLT_AM Time:", self._wxStopLT_AM
+                 newFirst = (modFirstPeriod, label) 
+                 print "new first period info is:", newFirst
+                 periodModded = 1   
+
+        if (periodModded <> 0): # lets insert the new and pop the old
+            #first the wxPeriods
+            self._codePeriods.insert(0,newFirst) 
+            self._codePeriods.pop(1)
+            self._popPeriods.insert(0,newFirst) 
+            self._popPeriods.pop(1)
+
+        print "returned codePeriods in determineTimeRanges is:",self._codePeriods
+        print "returned popPeriods in determinTimeRanges is:", self._popPeriods
+        print "***returned tempPeriods in determinTimeRanges:", self._tempPeriods
+        return 
+
+## Original from CCF.py. .
+    def _sampleData(self, argDict):
+        # Sample the data. Returns the samplers for pop, snow, temp, and code
+        # MaxApT and MinApT added
+        sampleList = []
+        sampleList.append((self._analysisListPoP(), self._popPeriods))
+        sampleList.append((self._analysisListSnow(), self._snowPeriods))
+        sampleList.append((self._analysisListTemp(), self._tempPeriods))
+        # Modified to add sampling for ApparentT
+        sampleList.append((self._analysisListApparentTemp(), self._popPeriods))
+        sampleList.append((self._analysisListCode(), self._codePeriods))
+        sampleInfo = []
+        for analList, periods in sampleList:
+            sampleInfo.append((analList, periods, self._areaList))
+      
+        self._sampler = self.getSampler(argDict, sampleInfo)
+        return
+    
+    def _makeProduct(self, fcst, editArea, areaLabel, argDict):
+        # creates the product for each edit area
+
+        ########################
+        # first line of product
+        ########################
+
+        # wx codes
+        for index in xrange(0, 5):
+            timeRange, label = self._codePeriods[index]
+            fcst = fcst + self._getCCFCode(self._analysisListCode(),
+                editArea, timeRange)
+        fcst = fcst + " "
+
+        # max/min temp codes
+        separators = ["/", " ", "/", " ", " "]
+        for index in xrange(0, 5):
+            timeRange, label = self._tempPeriods[index]
+            fcst = fcst + self._getMinOrMax(self._analysisListTemp(),
+                editArea, timeRange) + separators[index]
+
+        # forecaster number
+        fcst = fcst + self._forecasterNumber
+
+        # Pop fields
+        for index in xrange(0, 3):
+            timeRange, label = self._popPeriods[index]
+            fcst = fcst + self._getPoP(self._analysisListPoP(), editArea,
+                              timeRange)
+
+        # Snow fields
+        if self._alwaysIncludeSnow:
+            fcst = fcst + self._addSnowEntries(self._analysisListSnow(),
+                                               self._snowPeriods, editArea)
+        fcst = fcst + "\n"
+
+        ########################
+        # second line of product
+        ########################
+
+        fcst = fcst + "    "    # ident 4 spaces on the 2nd line
+
+        # wx codes
+        startIndex = 5
+        for index in xrange(startIndex, len(self._codePeriods)):
+            timeRange, label = self._codePeriods[index]
+            fcst = fcst + self._getCCFCode(self._analysisListCode(),
+                editArea, timeRange)
+        fcst = fcst + " "
+
+        # max/min temp codes
+        startIndex = 5
+        separators = ["/", " ", "/", " ", "/", " ", "/", " ", " "]
+        for index in xrange(startIndex, len(self._tempPeriods)):
+            timeRange, label = self._tempPeriods[index]
+            fcst = fcst + self._getMinOrMax(self._analysisListTemp(),
+                editArea, timeRange) + separators[index-startIndex]
+
+        # Pop fields
+        startIndex = 3
+        for index in xrange(startIndex, len(self._popPeriods)):
+            timeRange, label = self._popPeriods[index]
+            fcst = fcst + self._getPoP(self._analysisListPoP(), editArea,
+                              timeRange)
+
+#This section of code takes the above handling of ApparentT, MaxApT and 
+#MinApT and adjustes it to use the PoP popPeriods temporal Handling 
+
+        fcst = fcst + "\n    "
+
+        # max/min apparent temp codes
+        separators = [" ", " ", " ", " ", " "]
+        for index in xrange(0, 5):
+            timeRange, label = self._popPeriods[index]
+            fcst = fcst + self._getMax(self._analysisListApparentTemp(),
+                editArea, timeRange) + separators[index]
+ 
+       # max/min apparent temp codes
+        startIndex = 5
+        separators = [" ", " ", " ", " ", " ", " ", " ", " ", " "]
+        for index in xrange(startIndex, len(self._popPeriods)):
+            timeRange, label = self._popPeriods[index]
+            fcst = fcst + self._getMax(self._analysisListApparentTemp(),
+                editArea, timeRange) + separators[index-startIndex]
+ 
+        fcst = fcst + "\n    "
+ 
+       # max/min apparent temp codes
+        separators = [" ", " ", " ", " ", " "]
+        for index in xrange(0, 5):
+           timeRange, label = self._popPeriods[index]
+           fcst = fcst + self._getMin(self._analysisListApparentTemp(),
+                editArea, timeRange) + separators[index]
+
+        # max/min apparent temp codes
+        startIndex = 5
+        separators = [" ", " ", " ", " ", " ", " ", " ", " ", " "]
+        for index in xrange(startIndex, len(self._popPeriods)):
+            timeRange, label = self._popPeriods[index]
+            fcst = fcst + self._getMin(self._analysisListApparentTemp(),
+                editArea, timeRange) + separators[index-startIndex]
+
+         ###########################################################################
+         # end of apparent t handling code.
+         ###########################################################################
+
+        fcst = fcst + "\n"
+        return fcst
+
+    def _analysisListApparentTemp(self):
+      return [
+          ("MaxApT", self.avg),
+          ("MinApT", self.avg),
+          ("ApparentT", self.minMax),
+          ]
+
+    def _analysisListCode(self):
+      return [
+          ("MinT", self.avg),
+          ("MaxT", self.avg),
+          ("MaxApT", self.avg),
+          ("MinApT", self.avg),
+          ("ApparentT", self.minMax),
+          ("PoP", self.stdDevMaxAvg),
+          ("Wx", self.dominantWx),
+          ("Sky", self.avg),
+          ("Wind", self.vectorAvg)
+          ]
+
+##########################################################################
+#
+#  Uncomment this section to use just the Max and Min of the ApparentT
+#
+##########################################################################
+    def _getMax(self, analysisList, area, timeRange):
+        # Return a Max or Min value depending on availability
+        # Examples:  076 for positive, 915 for negative, MMM for missing
+        statDict = self.getStatDict(self._sampler, analysisList,
+                                    timeRange, area)
+        stats = self.getStats(statDict, "ApparentT")
+        minAppT, maxAppT = self.getValue(stats, "MinMax")
+        dayNight = self.getPeriod(timeRange,shiftToLocal=1)
+        if dayNight == self.DAYTIME():
+            return self._aTemperatureFormat(maxAppT)
+        else:
+            return self._aTemperatureFormat(maxAppT)
+  
+    def _getMin(self, analysisList, area, timeRange):
+        # Return a Max or Min value depending on availability
+        # Examples:  076 for positive, 915 for negative, MMM for missing
+        statDict = self.getStatDict(self._sampler, analysisList,
+                                    timeRange, area)
+        stats = self.getStats(statDict, "ApparentT")
+        minAppT, maxAppT = self.getValue(stats, "MinMax")
+        dayNight = self.getPeriod(timeRange,shiftToLocal=1)
+        if dayNight == self.DAYTIME():
+            return self._aTemperatureFormat(minAppT)
+        else:
+            return self._aTemperatureFormat(minAppT)
+  
+    def _aTemperatureFormat(self, value):
+        # Return a 3-digit string with leading zeroes given the value
+        # Examples: 076 for positive, 915 for negative, MMM for missing
+        if value is None:
+                return "MMM"   #for missing
+        #print "value in aTemperatureFormat is:", value
+        value = int(round(value))
+        if value < 0:
+            value = abs(value) + 900
+        valStr = `value`
+        while len(valStr) < 3:
+            valStr = "0" + valStr
+        return valStr
+#####################################################################
+# End of Max and Min of ApparentT section
+#####################################################################
+
+
